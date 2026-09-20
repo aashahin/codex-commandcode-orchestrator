@@ -1,0 +1,26 @@
+{
+  "name": "codex-commandcode-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "start": "bun src/index.ts",
+    "install-local": "bun scripts/install.ts",
+    "doctor": "bun scripts/doctor.ts",
+    "smoke": "bun scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.5.4",
+    "@iarna/toml": "2.2.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3",
+    "@types/iarna__toml": "2.0.5"
+  },
+  "description": "MCP bridge for Codex delegation through the Command Code CLI with isolated Git worktrees.",
+  "packageManager": "bun@1.4.2"
+}

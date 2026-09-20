@@ -1,0 +1,27 @@
+node_modules/
+coverage/
+dist/
+*.log
+*.tmp
+.DS_Store
+
+# Credentials and local configuration
+.env
+.env.*
+*.env
+*.pem
+*.key
+auth.json
+credentials.json
+.commandcode/
+.codex/
+.codex2/
+.opencode/
+.mcp.json
+
+# Local smoke evidence and runtime data
+/SMOKE-TESTS.json
+/state/
+/cache/
+/worktrees/
+*.before-orchestrator-*
