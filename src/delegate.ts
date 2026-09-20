@@ -3,7 +3,6 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { TaskSchema, paths, VERSION, type Config, type Task } from "./config";
 import { CommandCode, type Runtime } from "./commandcode";
-import { catalog } from "./catalog";
 import { command } from "./git";
 import { providerProbe, recordProviderProbe } from "./diagnostics";
 import { safeRelative, errorText, redact } from "./security";
@@ -13,7 +12,7 @@ import { State, type WorkerRecord } from "./state";
 import { collect, workerDiff, applyPatch } from "./patches";
 import { Semaphore, parallel } from "./parallel";
 import { choose, mappings } from "./router";
-import { parseReport } from "./prompts";
+import { parseReport, emptyReport } from "./prompts";
 import { RECOVERY_GUIDANCE } from "./guidance";
 export class Bridge {
   readonly state: State;
@@ -33,6 +32,7 @@ export class Bridge {
   }
   async health() {
     const runtime = await this.runtime.health();
+    const list = await this.runtime.models();
     const workers = await this.state.list();
     const counts: Record<string, number> = {};
     for (const worker of workers) {
@@ -66,17 +66,20 @@ export class Bridge {
         guardrails: this.config.guardrails,
         running: this.active.size,
       },
-      routing: mappings(this.config),
+      routing: mappings(this.config, list.models),
+      models: { source: list.source, warning: list.warning },
       workers: { total: workers.length, counts },
     };
   }
   async models() {
+    const list = await this.runtime.models();
     return {
-      routing: mappings(this.config),
-      catalog,
+      routing: mappings(this.config, list.models),
+      models: list.models,
       efforts: ["low", "medium", "high", "xhigh", "max"],
-      source: "documented Command Code catalog snapshot",
-      note: "Efforts are model-specific; entries listing none decide their own reasoning depth. Any BYOK or custom provider id is accepted and passed through as-is, and a non-effort suffix such as :free is preserved. Pass model as id or id:effort, or set effort separately.",
+      source: list.source,
+      warning: list.warning,
+      note: "ids come from cmd --list-models, so they are exact. Pass model and effort as separate fields: the CLI takes --model id --effort level and rejects the id:effort form as an unknown model. Effort support is model-specific and cmd validates it, so an unsupported pair fails before it spends anything. Any BYOK or custom provider id is passed through to cmd as-is.",
     };
   }
   delegate(input: unknown, signal?: AbortSignal) {
@@ -100,7 +103,14 @@ export class Bridge {
       task.mode !== "read_only"
     )
       throw Error("Explorers and reviewers must be read-only");
-    const model = choose(task.role, this.config, task.model, task.effort);
+    const models = await this.runtime.models(parent);
+    const model = choose(
+      task.role,
+      this.config,
+      models.models,
+      task.model,
+      task.effort,
+    );
     const id = randomUUID();
     const controller = new AbortController();
     this.active.set(id, controller);
@@ -114,7 +124,7 @@ export class Bridge {
     const r: WorkerRecord = {
       id,
       role: task.role,
-      model: model.key,
+      model: model.id,
       requestedEffort: model.effort,
       status: "running",
       created: new Date().toISOString(),
@@ -123,6 +133,7 @@ export class Bridge {
     };
     await this.state.save(r);
     const warnings: string[] = [];
+    if (models.warning) warnings.push(models.warning);
     let response;
     try {
       signal.throwIfAborted();
@@ -168,6 +179,11 @@ export class Bridge {
         if (this.config.guardrails)
           await restoreOverlay(r.snapshot.worktree, this.state.dir(id));
         await collect(r, this.state, this.config);
+        r.collected = true;
+        if (r.artifacts)
+          warnings.push(
+            `The worktree's ignored files exceed the snapshot limits, so ${r.artifacts.count} of them were left out of the patch (for example ${r.artifacts.sample.join(", ")}). A worker-run install or build normally causes this; inspect the worktree if you expected generated artifacts.`,
+          );
         if (task.mode === "read_only" && r.changedFiles.length) {
           r.status = "failed";
           warnings.push(
@@ -179,22 +195,23 @@ export class Bridge {
       r.status = "quarantined";
       warnings.push(errorText(e));
     }
-    const { report, warnings: parseWarnings } = parseReport(
-      response?.text ?? "",
-    );
-    if (response) warnings.push(...parseWarnings);
+    const { report, warnings: parseWarnings } = response?.text?.trim()
+      ? parseReport(response.text)
+      : { report: emptyReport(), warnings: [] };
+    warnings.push(...parseWarnings);
     const result = {
       id,
       status: r.status,
       role: task.role,
       mode: task.mode,
-      model: model.key,
+      model: model.id,
       requestedEffort: model.effort,
       modelVerified: false,
       summary: report.summary,
       findings: report.findings,
       changes: report.changes,
       changedFiles: r.changedFiles,
+      ignoredFiles: r.artifacts,
       verification: task.verification.map((entry) => ({
         command: entry,
         status: "not_run",
@@ -234,7 +251,7 @@ export class Bridge {
       await recordProviderProbe(
         this.state.root,
         "commandcode",
-        model.key,
+        model.effort ? `${model.id} (effort ${model.effort})` : model.id,
         r.status === "completed",
         r.status === "completed"
           ? undefined
@@ -287,10 +304,30 @@ export class Bridge {
     return this.state.lock("worker-" + id, async () => {
       const r = await this.state.get(id);
       if (r.status === "discarded") return { id, status: "discarded" };
+      let collectError: string | undefined;
       if (r.snapshot) {
         if (this.config.guardrails)
           await restoreOverlay(r.snapshot.worktree, this.state.dir(id));
-        if (r.status !== "applied") await collect(r, this.state, this.config);
+        // Only collect what was never collected; re-scanning on every teardown is
+        // what made an oversized worktree permanently undiscardable.
+        if (!r.collected && r.status !== "applied")
+          try {
+            await collect(r, this.state, this.config);
+            r.collected = true;
+          } catch (e) {
+            collectError = errorText(e);
+          }
+      }
+      if (collectError && !discardPatch) {
+        r.warning = `Changes could not be collected: ${collectError}. The worktree is preserved; pass discardPatch:true to drop it.`;
+        await this.state.save(r);
+        return {
+          id,
+          status: "preserved",
+          patchAvailable: Boolean(r.patchHash),
+          worktree: r.snapshot?.worktree,
+          warning: r.warning,
+        };
       }
       if (r.patchHash && r.status !== "applied" && !discardPatch) {
         r.status = "failed";
@@ -310,7 +347,11 @@ export class Bridge {
       r.snapshot = undefined;
       r.result = undefined;
       await this.state.save(r);
-      return { id, status: "discarded" };
+      return {
+        id,
+        status: "discarded",
+        ...(collectError ? { warning: `Discarded uncollected changes: ${collectError}` } : {}),
+      };
     });
   }
   async cancel(id: string) {
@@ -335,6 +376,7 @@ export class Bridge {
     };
   }
   async reconcile() {
+    const released = await this.state.releaseStaleLocks();
     for (const worker of await this.state.list(true)) {
       if (!("status" in worker) || worker.status !== "running") continue;
       try {
@@ -346,6 +388,7 @@ export class Bridge {
         await this.state.save(r);
       } catch {}
     }
+    return { released };
   }
   async close() {
     this.closing = true;

@@ -33,6 +33,9 @@ export const ReportSchema = z.object({
   risks: z.array(z.string().max(2000)).max(30).default([]),
 });
 export type Report = z.infer<typeof ReportSchema>;
+export function emptyReport(): Report {
+  return { summary: "", findings: [], changes: [], tests: [], risks: [] };
+}
 export function contract(task: Task, worktree: string) {
   const mode =
     task.mode === "read_only"
@@ -74,6 +77,34 @@ No nested agents or sub-agents. No git commit, git push, git remote changes, bra
     40000,
   );
 }
+export function embeddedObjects(text: string) {
+  const found: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let quoted = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (char === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        found.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return found;
+}
 export function parseReport(text: string): {
   report: Report;
   warnings: string[];
@@ -84,20 +115,23 @@ export function parseReport(text: string): {
     raw.endsWith("```")
   )
     raw = raw.slice(raw.indexOf("\n") + 1, -3).trim();
-  try {
-    return { report: ReportSchema.parse(JSON.parse(raw)), warnings: [] };
-  } catch {
-    return {
-      report: {
-        summary: redact(text, 12000),
-        findings: [],
-        changes: [],
-        tests: [],
-        risks: [],
-      },
-      warnings: [
-        "Worker output failed JSON schema validation; treat summary as unverified prose.",
-      ],
-    };
+  // Workers often wrap the contract object in prose, so fall back to the last
+  // balanced object in the text before giving up on structure entirely.
+  for (const candidate of [raw, ...embeddedObjects(raw).reverse()]) {
+    try {
+      return { report: ReportSchema.parse(JSON.parse(candidate)), warnings: [] };
+    } catch {}
   }
+  return {
+    report: {
+      summary: redact(raw, 12000),
+      findings: [],
+      changes: [],
+      tests: [],
+      risks: [],
+    },
+    warnings: [
+      "Worker output failed JSON schema validation; treat summary as unverified prose.",
+    ],
+  };
 }

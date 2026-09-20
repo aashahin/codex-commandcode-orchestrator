@@ -19,6 +19,7 @@ export interface Entry {
   hash: string;
   mode: string;
 }
+export class LimitError extends Error {}
 export interface Snapshot {
   id: string;
   repo: string;
@@ -56,7 +57,11 @@ export async function scan(
       "--exclude-standard",
       "-z",
     ]);
-    files.push(...ignored.toString().split("\0").filter(Boolean));
+    // Dependency installs are disposable build inputs, not worker source. Only
+    // exclude ignored copies: explicitly tracked dependency files stay above.
+    files.push(...ignored.toString().split("\0").filter(
+      (file) => file && !file.split("/").includes("node_modules"),
+    ));
   }
   const entries: Record<string, Entry> = Object.create(null);
   let bytes = 0;
@@ -81,7 +86,7 @@ export async function scan(
       throw Error("Special files cannot be snapshotted");
     bytes += stat.size;
     if (bytes > config.maxSnapshotBytes || count++ >= config.maxFiles)
-      throw Error("Snapshot size limit exceeded");
+      throw new LimitError("Snapshot size limit exceeded");
     const data = stat.isSymbolicLink()
       ? Buffer.from(await readlink(path))
       : await readFile(path);

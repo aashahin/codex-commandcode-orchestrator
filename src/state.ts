@@ -5,6 +5,7 @@ import {
   rename,
   rm,
   readdir,
+  stat,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -32,6 +33,8 @@ export interface WorkerRecord {
   snapshot?: Snapshot;
   patchHash?: string;
   changedFiles: string[];
+  artifacts?: { count: number; sample: string[] };
+  collected?: boolean;
   reviewedBytes?: number;
   exitCode?: number;
   stopReason?: string;
@@ -114,5 +117,48 @@ export class State {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  }
+  // A lock whose owner is gone would otherwise block its worker forever.
+  async releaseStaleLocks(graceMs = 60000) {
+    const root = join(this.root, "locks");
+    const released: string[] = [];
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      return released;
+    }
+    for (const key of entries) {
+      const dir = join(root, key);
+      let owner: { pid?: unknown } | undefined;
+      try {
+        owner = JSON.parse(await readFile(join(dir, "owner.json"), "utf8"));
+      } catch {}
+      let stale: boolean;
+      if (typeof owner?.pid === "number" && Number.isInteger(owner.pid))
+        stale = !alive(owner.pid);
+      else {
+        // The owner record never landed, so fall back to age rather than race a
+        // lock that is still being created.
+        const age = await stat(dir).then(
+          (value) => value.mtimeMs,
+          () => undefined,
+        );
+        stale = age !== undefined && Date.now() - age > graceMs;
+      }
+      if (!stale) continue;
+      await rm(dir, { recursive: true, force: true });
+      released.push(key);
+    }
+    return released;
+  }
+}
+function alive(pid: number) {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
   }
 }

@@ -2,10 +2,11 @@ import { test, expect } from "bun:test";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { TaskSchema, type Config } from "../src/config";
-import { CommandCode, classify, workerArgs } from "../src/commandcode";
+import { CommandCode, classify, preflight, workerArgs } from "../src/commandcode";
 import { choose } from "../src/router";
 import {
   config as defaultConfig,
+  models,
   sandboxWithCommand,
   dispose,
 } from "./helpers";
@@ -25,7 +26,7 @@ async function run(
     repoDir: dir,
     mode: input.mode ?? "write_isolated",
   });
-  const model = choose("implementer", box.config);
+  const model = choose("implementer", box.config, models);
   const runtime = new CommandCode(box.config);
   const result = await runtime.run(
     task,
@@ -57,7 +58,7 @@ test("exit codes map to worker statuses", () => {
   expect(classify(0, ok, "cancel").status).toBe("cancelled");
 });
 test("read_only workers use plan mode and write workers get --yolo", () => {
-  const model = choose("explorer", defaultConfig);
+  const model = choose("explorer", defaultConfig, models);
   const readOnly = workerArgs(
     TaskSchema.parse({ task: "x", repoDir: "/tmp", mode: "read_only" }),
     model,
@@ -82,13 +83,14 @@ test("read_only workers use plan mode and write workers get --yolo", () => {
     expect(args).toContain("--output-format");
     expect(args).toContain("--trust");
     expect(args).toContain("--skip-onboarding");
-    expect(args[args.indexOf("--model") + 1]).toBe(model.key);
+    expect(args[args.indexOf("--model") + 1]).toBe(model.id);
   }
 });
 test("worker args honour max turns, effort, extra args and tool opt-ins", () => {
   const overridden: Config = { ...defaultConfig, maxTurns: 12, extraArgs: ["--config", "theme=dark"], toolsEnable: ["todo_write"] };
-  const model = choose("implementer", overridden, "gpt-5.6-sol", "xhigh");
-  expect(model.key).toBe("gpt-5.6-sol:xhigh");
+  const model = choose("implementer", overridden, models, "gpt-5.6-sol", "xhigh");
+  expect(model.id).toBe("gpt-5.6-sol");
+  expect(model.effort).toBe("xhigh");
   const args = workerArgs(
     TaskSchema.parse({ task: "x", repoDir: "/tmp", mode: "write_isolated" }),
     model,
@@ -96,7 +98,8 @@ test("worker args honour max turns, effort, extra args and tool opt-ins", () => 
     overridden,
   );
   expect(args[args.indexOf("--max-turns") + 1]).toBe("12");
-  expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.6-sol:xhigh");
+  expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.6-sol");
+  expect(args[args.indexOf("--effort") + 1]).toBe("xhigh");
   expect(args[args.indexOf("--tools-enable") + 1]).toBe("todo_write");
   expect(args.slice(-2)).toEqual(["--config", "theme=dark"]);
   const perTask = workerArgs(
@@ -205,7 +208,7 @@ test("cancelling a hung worker terminates its process group", async () => {
     setTimeout(() => controller.abort(Error("cancelled by test")), 300);
     const result = await runtime.run(
       task,
-      choose("implementer", box.config),
+      choose("implementer", box.config, models),
       dir,
       controller.signal,
       async () => {},
@@ -229,4 +232,49 @@ test("a worker that writes leaves the change in its own worktree", async () => {
     await dispose(box.base);
     await dispose(dir);
   }
+});
+
+test("V4.1 max effort is a separate CLI flag and model identity is unchanged", () => {
+  const model = choose("implementer", defaultConfig, models, "deepseek/deepseek-v4.1-flash", "max");
+  const args = workerArgs(TaskSchema.parse({task:"x",repoDir:"/tmp",mode:"write_isolated"}),model,"/w",defaultConfig);
+  expect(args[args.indexOf("--model") + 1]).toBe("deepseek/deepseek-v4.1-flash");
+  expect(args[args.indexOf("--effort") + 1]).toBe("max");
+  expect(args).not.toContain("deepseek/deepseek-v4.1-flash:max");
+});
+test("a model id given as id:effort is split, never passed through", () => {
+  const model = choose("implementer", defaultConfig, models, "gpt-5.6-sol:xhigh");
+  expect(model.id).toBe("gpt-5.6-sol");
+  expect(model.effort).toBe("xhigh");
+  const args = workerArgs(
+    TaskSchema.parse({ task: "x", repoDir: "/tmp", mode: "write_isolated" }),
+    model,
+    "/w",
+    defaultConfig,
+  );
+  expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.6-sol");
+  expect(args[args.indexOf("--effort") + 1]).toBe("xhigh");
+  expect(args[args.indexOf("--model") + 1]).not.toContain(":");
+});
+test("no effort flag is emitted when none was requested", () => {
+  const model = choose("implementer", defaultConfig, models);
+  const args = workerArgs(
+    TaskSchema.parse({ task: "x", repoDir: "/tmp", mode: "write_isolated" }),
+    model,
+    "/w",
+    defaultConfig,
+  );
+  expect(args).not.toContain("--effort");
+});
+test("cmd pre-flight rejections become actionable warnings", () => {
+  expect(
+    preflight('Error: unknown model "deepseek/deepseek-v4.1-flash:high".\n'),
+  ).toContain("cc_models");
+  expect(preflight('Error: unknown model "x"')).toContain(
+    'rejected the model "x"',
+  );
+  expect(
+    preflight("Claude Haiku 4.5 has no adjustable reasoning effort."),
+  ).toContain("no adjustable reasoning effort");
+  expect(preflight("some unrelated failure")).toBeUndefined();
+  expect(preflight("")).toBeUndefined();
 });

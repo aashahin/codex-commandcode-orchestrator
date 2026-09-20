@@ -268,7 +268,8 @@ test("health reports the bridge, routing and worker counts without touching auth
     const health = (await b.health()) as {
       runtime: { binary: string; version?: string };
       bridge: { version: string; guardrails: boolean; parallelism: number };
-      routing: Record<string, string>;
+      routing: Record<string, { model: string; effort?: string } | null>;
+      models: { source: string };
       workers: { total: number; counts: Record<string, number> };
     };
     expect(health.runtime.binary).toBe(box.config.command!);
@@ -276,24 +277,36 @@ test("health reports the bridge, routing and worker counts without touching auth
     expect(health.bridge.version).toBe("0.1.0");
     expect(health.bridge.guardrails).toBe(true);
     expect(health.bridge.parallelism).toBe(1);
-    expect(health.routing.implementer).toBe("moonshotai/Kimi-K2.7-Code");
+    expect(health.models.source).toBe("cmd --list-models");
+    expect(health.routing.implementer).toEqual({
+      model: "moonshotai/kimi-k2.7-code",
+    });
     expect(health.workers.counts.completed).toBe(1);
   } finally {
     await dispose(repo);
     await dispose(box.base);
   }
 });
-test("cc_models exposes the catalog and the roles it is routed from", async () => {
+test("cc_models reports the live ids cmd advertises", async () => {
   const { box, bridge: b } = await bridge("success");
   try {
     const models = (await b.models()) as {
-      routing: Record<string, string>;
-      catalog: unknown[];
+      routing: Record<string, { model: string; effort?: string } | null>;
+      models: Array<{ id: string; shortName: string; efforts?: string[] }>;
       efforts: string[];
+      source: string;
+      warning?: string;
     };
-    expect(models.catalog.length).toBeGreaterThan(40);
+    expect(models.source).toBe("cmd --list-models");
+    expect(models.warning).toBeUndefined();
+    expect(models.models.map((m) => m.id)).toContain(
+      "moonshotai/kimi-k2.7-code",
+    );
     expect(models.efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    expect(models.routing.explorer).toBe("deepseek/deepseek-v4-flash");
+    expect(models.routing.explorer).toEqual({
+      model: "deepseek/deepseek-v4-flash",
+    });
+    expect(models.routing.reviewer).toEqual({ model: "qwen/qwen3.8-max" });
   } finally {
     await dispose(box.base);
   }

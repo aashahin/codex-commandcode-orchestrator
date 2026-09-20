@@ -1,5 +1,6 @@
 import { commandBinary, VERSION, type Config, type Task } from "./config";
 import { command } from "./git";
+import { ModelCatalog, type ModelList } from "./models";
 import { contract } from "./prompts";
 import type { Model } from "./router";
 import { errorText } from "./security";
@@ -33,6 +34,7 @@ export interface RuntimeHealth {
   bridge: string;
 }
 export interface Runtime {
+  models(signal?: AbortSignal): Promise<ModelList>;
   run(
     task: Task,
     model: Model,
@@ -87,16 +89,35 @@ export function workerArgs(
     "--max-turns",
     String(task.maxTurns ?? config.maxTurns),
     "--model",
-    model.key,
-    "--trust",
-    "--skip-onboarding",
+    model.id,
   ];
+  // cmd rejects "id:effort" as an unknown model, so effort travels as its own flag.
+  if (model.effort) args.push("--effort", model.effort);
+  args.push("--trust", "--skip-onboarding");
   if (task.mode === "read_only") args.push("--permission-mode", "plan");
   else args.push("--yolo");
   if (config.toolsEnable.length)
     args.push("--tools-enable", config.toolsEnable.join(","));
   args.push(...config.extraArgs);
   return args;
+}
+export function preflight(stderr: string) {
+  const unknown = /unknown model "([^"]+)"/i.exec(stderr);
+  if (unknown)
+    return `Command Code rejected the model "${unknown[1]}". Call cc_models for the live id list from cmd --list-models.`;
+  if (/has no adjustable reasoning effort/i.test(stderr))
+    return "The selected model has no adjustable reasoning effort; drop effort or choose a model that advertises one (see cc_models).";
+  return undefined;
+}
+// cmd prints flag confirmations to stderr to keep stdout pipeable; those are not problems.
+const informational = /^(Reasoning effort set to|Model set to|Config set)\b/i;
+export function stderrNoise(stderr: string) {
+  return stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !informational.test(line))
+    .join(" ");
 }
 function signalGroup(child: Bun.Subprocess<"ignore", "pipe", "pipe">, signal: NodeJS.Signals) {
   try {
@@ -138,7 +159,13 @@ async function readBounded(stream: ReadableStream<Uint8Array>, max: number) {
   return Buffer.concat(chunks).toString("utf8");
 }
 export class CommandCode implements Runtime {
-  constructor(readonly config: Config) {}
+  private readonly catalog: ModelCatalog;
+  constructor(readonly config: Config) {
+    this.catalog = new ModelCatalog(config);
+  }
+  models(signal?: AbortSignal) {
+    return this.catalog.list(signal);
+  }
   async run(
     task: Task,
     model: Model,
@@ -240,15 +267,18 @@ export class CommandCode implements Runtime {
     }
     const text = typeof result?.finalText === "string" ? result.finalText : "";
     const outcome = classify(exitCode, result, stop);
-    if (outcome.message) warn(outcome.message);
+    const rejection = preflight(stderr);
+    if (rejection && !stop) warn(rejection);
+    else if (outcome.message) warn(outcome.message);
     if (result?.subtype === "error" && result.error)
       warn(errorText(result.error));
-    if (!result && !stop)
+    if (!result && !stop && !rejection)
       warn(
         "Command Code emitted no result frame; the run cannot be validated",
       );
-    if (stderr.trim())
-      warn(`stderr: ${stderr.trim().replace(/\s+/g, " ").slice(0, 600)}`);
+    const noise = stderrNoise(stderr);
+    if (noise && !rejection && !stop)
+      warn(`stderr: ${noise.slice(0, 600)}`);
     if (result?.sessionId) await onSession(result.sessionId);
     return {
       text,

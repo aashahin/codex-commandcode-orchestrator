@@ -53,12 +53,16 @@ test("cc_models and cc_health answer over the MCP transport", async () => {
   const { box, server, client } = await connect("success");
   try {
     const models = data(await client.callTool({ name: "cc_models" })) as {
-      catalog: unknown[];
-      routing: Record<string, string>;
+      models: Array<{ id: string }>;
+      routing: Record<string, { model: string } | null>;
       note: string;
+      source: string;
     };
-    expect(models.catalog.length).toBeGreaterThan(40);
-    expect(models.routing.reviewer).toBe("Qwen/Qwen3.8-Max");
+    expect(models.source).toBe("cmd --list-models");
+    expect(models.models.map((m) => m.id)).toContain(
+      "moonshotai/kimi-k2.7-code",
+    );
+    expect(models.routing.reviewer).toEqual({ model: "qwen/qwen3.8-max" });
     expect(models.note).toContain("BYOK");
     const health = data(await client.callTool({ name: "cc_health" })) as {
       runtime: { binary: string };

@@ -6,6 +6,7 @@ import {
   symlink,
   chmod,
   rm,
+  mkdir,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -37,6 +38,31 @@ async function worker(f: Awaited<ReturnType<typeof setup>>) {
   await f.state.save(r);
   return r;
 }
+test("collection excludes ignored installed dependencies but preserves tracked dependency sources", async () => {
+  const f = await setup();
+  try {
+    await writeFile(join(f.repo, ".gitignore"), "node_modules/\n");
+    await mkdir(join(f.repo, "node_modules", "owned"), { recursive: true });
+    await writeFile(join(f.repo, "node_modules", "owned", "source.ts"), "original\n");
+    await git(f.repo, ["add", "-f", "node_modules/owned/source.ts"]);
+    const r = await worker(f);
+    const dir = r.snapshot!.worktree;
+    for (const path of ["node_modules/installed", "packages/ui/node_modules/installed"]) {
+      await mkdir(join(dir, path), { recursive: true });
+      await writeFile(join(dir, path, "large.js"), "x".repeat(2048));
+    }
+    await writeFile(join(dir, "a.txt"), "source change\n");
+    await writeFile(join(dir, "node_modules/owned/source.ts"), "tracked change\n");
+    const patch = await collect(r, f.state, { ...config, maxSnapshotBytes: 1024 });
+    expect(r.changedFiles).toEqual(["a.txt", "node_modules/owned/source.ts"]);
+    expect(patch.toString()).toContain("+tracked change");
+    expect(patch.toString()).not.toContain("large.js");
+    await cleanup(r.snapshot!, f.cache);
+  } finally {
+    await dispose(f.repo);
+    await dispose(f.base);
+  }
+});
 test("clean worktree snapshot and cleanup leave branch and index unchanged", async () => {
   const f = await setup();
   try {

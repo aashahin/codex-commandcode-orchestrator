@@ -1,17 +1,43 @@
 import { readFile, writeFile, lstat, readlink, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { git, repository } from "./git";
-import { scan, tree, indexEntries, type Entry } from "./worktrees";
+import { scan, tree, indexEntries, LimitError, type Entry } from "./worktrees";
 import { digest, redact, safeParents, safeRelative } from "./security";
 import type { Config } from "./config";
 import { State, type WorkerRecord } from "./state";
+export async function ignoredFiles(dir: string, sample = 5) {
+  const files = (
+    await git(dir, [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+    ])
+  )
+    .toString()
+    .split("\0")
+    .filter(Boolean);
+  if (!files.length) return undefined;
+  return { count: files.length, sample: files.slice(0, sample).sort() };
+}
 export async function collect(
   record: WorkerRecord,
   state: State,
   config: Config,
 ) {
   const s = record.snapshot!;
-  const entries = await scan(s.worktree, config, undefined, true);
+  let entries;
+  try {
+    entries = await scan(s.worktree, config, undefined, true);
+  } catch (e) {
+    // An ignored tree the worker materialised (a build or an install under a name
+    // we do not skip) must never make the worker undiscardable. Fall back to the
+    // snapshot's own scope and report what was left out.
+    if (!(e instanceof LimitError)) throw e;
+    entries = await scan(s.worktree, config, undefined, false);
+    record.artifacts = await ignoredFiles(s.worktree);
+  }
   const t = await tree(s.worktree, entries, state.dir(s.id));
   const patch = await git(s.worktree, [
     "diff",

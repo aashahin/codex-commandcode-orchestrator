@@ -6,6 +6,12 @@ import { git } from "../src/git";
 import { ROOT } from "../src/config";
 const fake = process.argv.includes("--fake");
 const apply = process.argv.includes("--apply");
+const flag = (name: string) => {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+};
+const modelArg = flag("--model");
+const effortArg = flag("--effort");
 const bun = Bun.which("bun") ?? "bun";
 const base = await mkdtemp("/tmp/cc-smoke-");
 const repo = join(base, "repo");
@@ -81,13 +87,21 @@ console.log(
 );
 const health = (await call("cc_health")) as {
   runtime: { binary: string; version?: string };
-  routing: Record<string, string>;
+  routing: Record<string, { model: string; effort?: string } | null>;
 };
 console.log("command:", health.runtime.binary, health.runtime.version ?? "");
 console.log("routing:", JSON.stringify(health.routing));
+const catalogue = (await call("cc_models")) as unknown as {
+  source: string;
+  warning?: string;
+  models: Array<{ id: string }>;
+};
+console.log(
+  `models: ${catalogue.models.length} from ${catalogue.source}${catalogue.warning ? ` -- WARNING: ${catalogue.warning}` : ""}`,
+);
 if (fake) console.log("\n--fake: bytes are written by a stub, no credits are spent");
 else console.log("\nLIVE: this run spends Command Code credits");
-const task = fake
+const task: Record<string, unknown> = fake
   ? {
       task: "Exercise the bridge end to end.",
       role: "implementer",
@@ -101,6 +115,10 @@ const task = fake
       mode: "read_only",
       verification: ["node --check cart.mjs"],
     };
+if (modelArg) task.model = modelArg;
+if (effortArg) task.effort = effortArg;
+if (modelArg || effortArg)
+  console.log(`requested: ${modelArg ?? "(routed)"} effort=${effortArg ?? "(none)"}`);
 const result = (await call("cc_delegate", task, 900000)) as {
   id: string;
   status: string;

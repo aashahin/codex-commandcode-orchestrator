@@ -4,9 +4,15 @@
 // stay parallel-safe.
 const mode = process.env.FAKE_CMD_MODE ?? "success";
 const exit = Number(process.env.FAKE_CMD_EXIT ?? "0");
-// Mirror the real CLI so version probes never trigger worker behaviour.
+// Mirror the real CLI so version and model-list probes never trigger worker behaviour.
 if (process.argv.includes("--version") || process.argv.includes("-v")) {
   process.stdout.write("fake-cmd 0.0.0\n");
+  process.exit(0);
+}
+if (process.argv.includes("--list-models")) {
+  process.stdout.write(
+    `Available models  ·  6 models\n\nOpen Source\n\ndeepseek/deepseek-v4-flash             fast hybrid-attention reasoning (default)\ndeepseek/deepseek-v4-flash-vision-exp  fast hybrid-attention reasoning with vision\nmoonshotai/kimi-k2.7-code              improved long-horizon coding with vision\nmoonshotai/kimi-k3                     long-horizon coding & knowledge work\n\nAnthropic\n\nclaude-opus-5                          most intelligent Opus\n\nGoogle\n\nqwen/qwen3.8-max                       autonomous long-horizon coding\n\nDocs:  https://commandcode.ai/docs/reference/cli/models\n`,
+  );
   process.exit(0);
 }
 const out = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\n");

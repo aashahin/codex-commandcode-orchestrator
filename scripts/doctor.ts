@@ -6,6 +6,7 @@ import { loadConfig, commandBinary } from "../src/config";
 import { Bridge } from "../src/delegate";
 const config = await loadConfig();
 const bridge = new Bridge(config);
+const reconciled = await bridge.reconcile();
 const file = join(
   process.env.CODEX_HOME || join(homedir(), ".codex"),
   "config.toml",
@@ -25,6 +26,7 @@ console.log(
       health: await bridge.health(),
       codex: { config: file, mcpServer: registered },
       command: { resolved: commandBinary(config), config: config.command },
+      reconciled,
       workers: await bridge.state.list(true),
     },
     null,

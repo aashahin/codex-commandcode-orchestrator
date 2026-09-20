@@ -28,6 +28,26 @@ User → Codex → MCP bridge (commandcode_workers)
 
 Nothing auto-commits, auto-pushes or touches your working tree until you apply it.
 
+## Choosing a model and effort
+
+Ids come from **`cmd --list-models`**, which the bridge runs and caches, so `cc_models` always reports
+ids the installed CLI actually accepts, in the casing it reports them. `catalog.ts` keeps
+documentation metadata (context window, minimum plan, advertised efforts) and is merged in
+case-insensitively; it is only used as the id source if `--list-models` fails, and the response says so.
+
+Model and effort are **separate fields**, because `cmd` takes `--model <id>` and `--effort <level>` and
+rejects an `id:effort` model as unknown:
+
+```jsonc
+{ "model": "gpt-5.6-sol", "effort": "xhigh" }   // --model gpt-5.6-sol --effort xhigh
+```
+
+`"gpt-5.6-sol:xhigh"` is still accepted as *input* and split for you. Effort support is per-model and
+`cmd` is the authority: `cc_models` reports each model's advertised efforts, the bridge rejects an
+effort the metadata says a model lacks, and anything it does not know is passed through for `cmd` to
+accept or reject. A rejected pair fails before a worktree is created or credits are spent, and the
+failure names the reason. Set `"verifyEfforts": false` to skip the local check and defer entirely to `cmd`.
+
 ## Worker permissions
 
 | Task mode | Invocation | Effect |
@@ -61,7 +81,7 @@ but should be expected to report verification commands as not run, and Codex own
 | Tool | Purpose |
 | --- | --- |
 | `cc_health` | Command Code binary and version, bridge config, worker counts, routing, last live probe |
-| `cc_models` | Model catalog with context, advertised reasoning efforts and minimum plan, plus role routing |
+| `cc_models` | Live model ids from `cmd --list-models`, with context, advertised efforts and minimum plan, plus role routing |
 | `cc_delegate` | Run one worker in an isolated worktree |
 | `cc_delegate_parallel` | Run 1–16 independent workers with bounded concurrency |
 | `cc_worker_diff` | Inspect a worker patch, paginated, with a `reviewToken` once fully read |
@@ -89,11 +109,12 @@ changes is backed up to `<file>.before-orchestrator-<timestamp>` first.
 
 ```json
 {
-  "routing": { "implementer": ["moonshotai/Kimi-K2.7-Code"] },
+  "routing": { "implementer": ["moonshotai/kimi-k2.7-code:high"] },
   "parallelism": 2,
   "timeoutSeconds": 900,
   "maxTurns": 100,
   "guardrails": true,
+  "verifyEfforts": true,
   "extraArgs": [],
   "toolsEnable": []
 }
@@ -101,17 +122,36 @@ changes is backed up to `<file>.before-orchestrator-<timestamp>` first.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `routing` | per-role defaults | Ordered candidate ids; the first entry is used. Never silently downgraded. |
+| `routing` | per-role defaults | Ordered candidate ids, optionally `id:effort`; the first entry is used. Never silently downgraded. |
 | `parallelism` | `2` | Concurrent workers. Every run costs credits. |
 | `timeoutSeconds` | `900` | Per-worker wall clock. |
 | `maxTurns` | `100` | `--max-turns` for each worker. |
 | `guardrails` | `true` | Install the worktree deny-list overlay. |
+| `verifyEfforts` | `true` | Reject an effort the metadata says a model lacks. Off defers entirely to `cmd`, which validates the pair itself. |
 | `extraArgs` | `[]` | Extra `cmd` arguments appended to every worker run. |
 | `toolsEnable` | `[]` | Headless-withheld tools to re-enable, for example `todo_write`. |
 | `command` | `cmd` on PATH | Override the binary. `CC_BRIDGE_COMMAND` is also honoured. |
 
 Default routing stays on Go-and-above models so nothing is plan-gated out of the box: `deepseek/*` for
-explorers, `moonshotai/Kimi-K2.7-Code` for implementers, `Qwen/Qwen3.8-Max` for reviewers.
+explorers, `moonshotai/kimi-k2.7-code` for implementers, `qwen/qwen3.8-max` for reviewers.
+
+## Recovering a stuck worker
+
+`cc_discard_worker` is idempotent and only collects work it has not already collected, so a teardown
+never re-scans a worktree it has already handled. Two guards keep a worker from becoming permanently
+stuck:
+
+- **Oversized ignored trees.** Collection reads gitignored files too, so a worker that runs an install
+  or a build still contributes generated artifacts. `node_modules` is skipped outright, and if the
+  ignored tree still exceeds the snapshot limits the scan falls back to tracked and untracked files
+  only, reporting the count and a sample in `ignoredFiles` plus a warning. It never fails the worker.
+- **Stale locks.** A lock whose owning process is gone used to block its worker forever. `reconcile()`
+  now releases locks with a dead owner (or, when no owner record landed, locks older than a minute) at
+  bridge startup and in `codex-commandcode-doctor`.
+
+If collection genuinely fails, `cc_discard_worker` **preserves** the worktree and returns
+`status: "preserved"` with the reason, rather than deleting uncollected changes. Pass
+`discardPatch: true` only when you have decided to drop them.
 
 ## Verification
 
@@ -119,7 +159,8 @@ explorers, `moonshotai/Kimi-K2.7-Code` for implementers, `Qwen/Qwen3.8-Max` for 
 bun run smoke --fake          # full MCP round trip against a stub, no credits spent
 bun run smoke                 # one real read-only explorer task (spends credits)
 bun run smoke --fake --apply  # also exercise diff + apply
-codex-commandcode-doctor      # health, Codex registration and worker records
+bun run smoke --model deepseek/deepseek-v4-flash --effort high   # pin model and effort
+codex-commandcode-doctor      # health, Codex registration, stale locks and worker records
 ```
 
 ## Exit codes
@@ -133,11 +174,14 @@ with `subtype: "error"` fails the run even when the process exits `0`.
 
 1. **No model readback.** Command Code's headless `result` frame carries no model field, so the
    response reports the *requested* model and sets `modelVerified: false`. An invalid model id fails
-   the run rather than silently downgrading.
+   the run rather than silently downgrading. `cmd` printing `Reasoning effort set to …` on stderr is
+   treated as a confirmation, not a warning.
 2. **`--yolo` is broad.** Deny rules and the root/home circuit breaker hold, but Command Code does not
    gate absolute paths inside a shell command string, so a worker's shell can reach outside the
    worktree. The worktree is isolation, not a sandbox.
 3. **Workers do not outlive the bridge.** Cancelling kills the process group; a bridge restart leaves
    no live worker, and `reconcile()` marks such records cancelled on startup.
-4. **Trust records accumulate.** `--trust` is required for every throwaway worktree path.
-5. **Credits.** Every worker run is billed. `parallelism` defaults to 2 for that reason.
+4. **Ignored files can be left out of a patch.** Only when the ignored tree exceeds the snapshot
+   limits, and the result names the count and a sample when it happens.
+5. **Trust records accumulate.** `--trust` is required for every throwaway worktree path.
+6. **Credits.** Every worker run is billed. `parallelism` defaults to 2 for that reason.

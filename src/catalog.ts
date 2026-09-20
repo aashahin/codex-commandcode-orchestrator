@@ -92,7 +92,8 @@ export const catalog: CatalogEntry[] = [
   entry("xai/grok-4.6", "Grok 4.6", ["low", "medium", "high", "xhigh"], "GOAT", false, "500K", "frontier coding and STEM"),
 ];
 export function catalogEntry(id: string) {
-  return catalog.find((e) => e.id === id);
+  const target = id.toLowerCase();
+  return catalog.find((e) => e.id.toLowerCase() === target);
 }
 export function parseModel(value: string) {
   const index = value.lastIndexOf(":");
@@ -104,20 +105,17 @@ export function parseModel(value: string) {
   return { id: value, effort: undefined as string | undefined };
 }
 export function validate(model: string, effort?: string) {
-  if (!/^[A-Za-z0-9._:@/-]+$/.test(model))
-    throw Error("Invalid model id");
+  if (!/^[A-Za-z0-9._:@/-]+$/.test(model)) throw Error("Invalid model id");
   const parsed = parseModel(model);
   const selected = effort ?? parsed.effort;
   if (selected && parsed.effort && selected !== parsed.effort)
     throw Error(
       `Conflicting effort: model requests ${parsed.effort} but effort is ${selected}`,
     );
-  const known = catalogEntry(parsed.id);
-  if (!known)
-    return { id: parsed.id, effort: selected, known: false as const };
-  if (selected && !known.efforts.includes(selected))
-    throw Error(
-      `Model ${parsed.id} does not advertise effort ${selected}. Advertised: ${known.efforts.length ? known.efforts.join(", ") : "none"}`,
-    );
-  return { id: parsed.id, effort: selected, known: true as const };
+  return { id: parsed.id, effort: selected };
+}
+export function advertisedEfforts(id: string) {
+  const known = catalogEntry(id);
+  if (!known) return undefined;
+  return known.efforts;
 }

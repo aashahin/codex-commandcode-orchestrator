@@ -14,12 +14,13 @@ export const roles = [
 export type Role = (typeof roles)[number];
 export const efforts = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof efforts)[number];
-// Go-and-above floor only, so nothing is plan-gated out of the box. Override in config.json.
+// Live ids as reported by `cmd --list-models`. cmd is the authority on spelling, and
+// choose() also normalises anything else against that list.
 export const preferences: Record<Role, string[]> = {
   explorer: ["deepseek/deepseek-v4-flash"],
-  implementer: ["moonshotai/Kimi-K2.7-Code"],
-  reviewer: ["Qwen/Qwen3.8-Max"],
-  hard_reasoning: ["moonshotai/Kimi-K3"],
+  implementer: ["moonshotai/kimi-k2.7-code"],
+  reviewer: ["qwen/qwen3.8-max"],
+  hard_reasoning: ["moonshotai/kimi-k3"],
   vision: ["deepseek/deepseek-v4-flash-vision-exp"],
   cheap: ["deepseek/deepseek-v4-flash"],
 };
@@ -79,6 +80,12 @@ export const ConfigSchema = z
       .boolean()
       .default(true)
       .describe("Install the worktree deny-list overlay before each worker run."),
+    verifyEfforts: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Reject an effort the metadata says a model does not advertise. Turn off to defer entirely to cmd, which validates the pair itself.",
+      ),
   })
   .strict();
 export type Config = z.infer<typeof ConfigSchema>;

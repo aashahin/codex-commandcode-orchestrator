@@ -2,8 +2,37 @@ import { mkdtemp, writeFile, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { git } from "../src/git";
 import { ConfigSchema, type Config } from "../src/config";
+import type { LiveModel } from "../src/models";
 export const config = ConfigSchema.parse({});
 const fakeScript = new URL("fake-cmd.ts", import.meta.url).pathname;
+export function liveModel(
+  id: string,
+  efforts: string[],
+  vision = false,
+): LiveModel {
+  return {
+    id,
+    description: `${id} test entry`,
+    shortName: id.slice(id.lastIndexOf("/") + 1),
+    free: false,
+    efforts,
+    vision,
+  };
+}
+// Mirrors the shape parsed from `cmd --list-models`, in the casing cmd reports.
+export const models: LiveModel[] = [
+  liveModel("deepseek/deepseek-v4-flash", ["high", "max"]),
+  liveModel("deepseek/deepseek-v4-flash-vision-exp", ["high", "max"], true),
+  liveModel("moonshotai/kimi-k2.7-code", []),
+  liveModel("moonshotai/kimi-k3", ["low", "high", "max"]),
+  liveModel("qwen/qwen3.8-max", ["low", "medium", "xhigh"]),
+  liveModel("gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max"]),
+  liveModel("claude-opus-5", ["low", "medium", "high", "xhigh", "max"]),
+  liveModel("claude-haiku-4-5-20251001", []),
+  liveModel("zai-org/glm-5.3", ["low", "high", "max"]),
+  liveModel("poolside/laguna-s-2.1-free", []),
+];
+export const modelList = { models, source: "cmd --list-models" as const };
 export async function fixture() {
   const dir = await mkdtemp("/tmp/cc-bridge-test-");
   await git(dir, ["init", "-q"]);
